@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>BROWSER-CRAFT: RE-FIXED</title>
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Courier New', monospace; user-select: none; }
+        #main-menu, #pause-menu { position: absolute; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(0,0,0,0.4); z-index: 100; }
+        #pause-menu { display: none; background: rgba(0,0,0,0.6); }
+        .title { color: #fff; font-size: 64px; text-shadow: 4px 4px #222; margin-bottom: 40px; font-weight: bold; text-align: center; }
+        .menu-btn { width: 320px; padding: 15px; margin: 10px; background: #666; color: white; border: 3px solid #000; cursor: pointer; font-size: 18px; text-align: center; font-weight: bold; }
+        .menu-btn:hover { background: #44a044; border-color: #fff; }
+        #hud { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: none; gap: 8px; z-index: 20; }
+        .slot { width: 44px; height: 44px; background: rgba(0,0,0,0.6); border: 2px solid #555; display: flex; align-items: center; justify-content: center; color: white; }
+        .active { border-color: #fff; box-shadow: 0 0 15px #fff; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 16px; height: 16px; border: 2px solid white; border-radius: 50%; transform: translate(-50%, -50%); display: none; mix-blend-mode: difference; z-index: 10; }
+    </style>
+</head>
+<body>
+
+    <div id="main-menu">
+        <div class="title">BROWSER-CRAFT</div>
+        <div class="menu-btn" onclick="initGame('normal')">NORMAL MODE</div>
+        <div class="menu-btn" onclick="initGame('horror')">HORROR MODE</div>
+        <div class="menu-btn" onclick="initGame('fps')">FPS BOOST</div>
+    </div>
+
+    <div id="pause-menu">
+        <div class="title" style="font-size: 40px;">PAUSED</div>
+        <div class="menu-btn" onclick="resumeGame()">RESUME</div>
+        <div class="menu-btn" onclick="location.reload()">QUIT TO TITLE</div>
+    </div>
+
+    <div id="crosshair"></div>
+    <div id="hud">
+        <div id="s1" class="slot active">1</div>
+        <div id="s2" class="slot">2</div>
+        <div id="s3" class="slot">3</div>
+        <div id="s4" class="slot">4</div>
+        <div id="s5" class="slot">5</div>
+    </div>
+
+<script type="importmap"> { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } } </script>
+<script type="module">
+import * as THREE from 'three';
+
+let gameState = 'MENU';
+let currentMode = 'normal';
+let renderDist = 4;
+let selectedBlock = 0;
+const blockData = new Map();
+const chunks = new Map();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.rotation.order = 'YXZ';
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+const sun = new THREE.DirectionalLight(0xffffff, 0.5);
+sun.position.set(20, 40, 10);
+scene.add(ambient, sun);
+
+// --- HAND (Hidden by default) ---
+const playerArm = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.8), new THREE.MeshStandardMaterial({color: 0xffdbac}));
+playerArm.position.set(0.6, -0.5, -0.7);
+playerArm.visible = false; 
+camera.add(playerArm);
+scene.add(camera);
+
+// --- TEXTURES ---
+function getMat(color, dark=false) {
+    const canvas = document.createElement('canvas'); canvas.width=16; canvas.height=16;
+    const ctx = canvas.getContext('2d');
+    const r=parseInt(color.slice(1,3),16), g=parseInt(color.slice(3,5),16), b=parseInt(color.slice(5,7),16);
+    const m = dark ? 0.3 : 1;
+    for(let i=0; i<256; i++) {
+        const n = (Math.random()-0.5)*30;
+        ctx.fillStyle = `rgb(${(r+n)*m},${(g+n)*m},${(b+n)*m})`;
+        ctx.fillRect(i%16, Math.floor(i/16), 1, 1);
+    }
+    const t = new THREE.CanvasTexture(canvas);
+    t.magFilter = t.minFilter = THREE.NearestFilter;
+    return new THREE.MeshStandardMaterial({map: t});
+}
+const nMats = ['#5d8233','#795548','#808080','#2d4c1e','#5C4033'].map(c => getMat(c));
+const hMats = ['#2d4c1e','#3e2723','#424242','#1a2e15','#211510'].map(c => getMat(c, true));
+
+// --- BLOCK LOGIC ---
+const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+function spawnBlock(x,y,z,t,p) {
+    const k = `${Math.round(x)},${Math.round(y)},${Math.round(z)}`;
+    if(blockData.has(k)) return;
+    const m = new THREE.Mesh(boxGeo, currentMode === 'horror' ? hMats[t] : nMats[t]);
+    m.position.set(Math.round(x), Math.round(y), Math.round(z));
+    p.add(m);
+    blockData.set(k, m);
+}
+
+function genChunk(cx, cz) {
+    const g = new THREE.Group();
+    for(let x=0; x<8; x++) {
+        for(let z=0; z<8; z++) {
+            const wx=cx*8+x, wz=cz*8+z;
+            const h = Math.floor(Math.sin(wx*0.15)*3 + Math.cos(wz*0.15)*2);
+            for(let y=-8; y<=h; y++) spawnBlock(wx, y, wz, (y===h?0:(y>h-2?1:2)), g);
+            if(Math.random()>0.98) { // Trees
+                for(let i=1; i<=4; i++) spawnBlock(wx, h+i, wz, 4, g);
+                for(let lx=-1; lx<=1; lx++) for(let lz=-1; lz<=1; lz++) spawnBlock(wx+lx, h+5, wz+lz, 3, g);
+            }
+        }
+    }
+    scene.add(g); chunks.set(`${cx},${cz}`, g);
+}
+
+// --- INTERACTION FIX ---
+window.addEventListener('mousedown', (e) => {
+    if(gameState !== 'PLAYING' || !document.pointerLockElement) return;
+    
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera({x:0, y:0}, camera);
+    const intersects = ray.intersectObjects(scene.children, true);
+    
+    if(intersects.length > 0 && intersects[0].distance < 6) {
+        const hit = intersects[0];
+        const pos = hit.object.position;
+        if(e.button === 0) { // Left Click: Break
+            blockData.delete(`${pos.x},${pos.y},${pos.z}`);
+            hit.object.parent.remove(hit.object);
+        } else if(e.button === 2 || e.button === 0 && e.ctrlKey) { // Right Click: Place
+            const normal = hit.face.normal;
+            spawnBlock(pos.x + normal.x, pos.y + normal.y, pos.z + normal.z, selectedBlock, hit.object.parent);
+        }
+    }
+});
+
+// --- MENU CONTROL ---
+window.initGame = (mode) => {
+    currentMode = mode; gameState = 'PLAYING';
+    document.getElementById('main-menu').style.display = 'none';
+    document.getElementById('hud').style.display = 'flex';
+    document.getElementById('crosshair').style.display = 'block';
+    playerArm.visible = true; // Show arm only in-game
+    
+    if(mode === 'horror') {
+        scene.background = new THREE.Color(0x111111);
+        scene.fog = new THREE.Fog(0x111111, 2, 12);
+        ambient.intensity = 0.1; sun.visible = false;
+    } else {
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 15, 55);
+        ambient.intensity = 0.7; sun.visible = true;
+        renderDist = (mode === 'fps') ? 2 : 4;
+    }
+    renderer.domElement.requestPointerLock();
+};
+
+window.resumeGame = () => renderer.domElement.requestPointerLock();
+
+document.addEventListener('pointerlockchange', () => {
+    if (document.pointerLockElement === null && gameState === 'PLAYING') {
+        document.getElementById('pause-menu').style.display = 'flex';
+    } else {
+        document.getElementById('pause-menu').style.display = 'none';
+    }
+});
+
+// --- LOOP & INPUTS ---
+let yaw=0, pitch=0, vY=0, bob=0;
+const keys = {};
+window.onmousemove = (e) => { if(document.pointerLockElement) { yaw -= e.movementX*0.002; pitch -= e.movementY*0.002; pitch = Math.max(-1.5, Math.min(1.5, pitch)); } };
+window.onkeydown = (e) => { 
+    keys[e.code] = true; 
+    if(e.key >= 1 && e.key <= 5) {
+        selectedBlock = e.key - 1;
+        document.querySelectorAll('.slot').forEach((s, i) => s.classList.toggle('active', i === selectedBlock));
+    }
+};
+window.onkeyup = (e) => keys[e.code] = false;
+
+camera.position.set(0, 10, 0);
+function animate() {
+    requestAnimationFrame(animate);
+    if(gameState === 'MENU') {
+        yaw += 0.003; camera.rotation.set(-0.2, yaw, 0, 'YXZ');
+        for(let x=-2; x<=2; x++) for(let z=-2; z<=2; z++) if(!chunks.has(`${x},${z}`)) genChunk(x,z);
+    } else {
+        camera.rotation.set(pitch, yaw, 0, 'YXZ');
+        const cx = Math.floor(camera.position.x/8), cz = Math.floor(camera.position.z/8);
+        for(let x=cx-renderDist; x<=cx+renderDist; x++) for(let z=cz-renderDist; z<=cz+renderDist; z++) if(!chunks.has(`${x},${z}`)) genChunk(x,z);
+
+        const m = new THREE.Vector3();
+        if(keys['KeyW']) m.z -= 1; if(keys['KeyS']) m.z += 1;
+        if(keys['KeyA']) m.x -= 1; if(keys['KeyD']) m.x += 1;
+        m.normalize().applyQuaternion(camera.quaternion); m.y = 0;
+
+        const solid = (x,y,z) => blockData.has(`${Math.round(x)},${Math.floor(y)},${Math.round(z)}`);
+        const s = (currentMode === 'horror' ? 0.08 : 0.15);
+        if(!solid(camera.position.x+m.x*0.4, camera.position.y-0.5, camera.position.z)) camera.position.x += m.x*s;
+        if(!solid(camera.position.x, camera.position.y-0.5, camera.position.z+m.z*0.4)) camera.position.z += m.z*s;
+
+        vY -= 0.012; camera.position.y += vY;
+        if(solid(camera.position.x, camera.position.y-1.6, camera.position.z)) { camera.position.y = Math.floor(camera.position.y-1.6)+2.6; vY = 0; if(keys['Space'] && document.pointerLockElement) vY = 0.22; }
+
+        if(m.length() > 0) { bob += 0.15; playerArm.position.y = -0.5 + Math.sin(bob)*0.03; playerArm.position.x = 0.6 + Math.cos(bob)*0.02; }
+    }
+    renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
